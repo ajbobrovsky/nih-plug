@@ -117,6 +117,8 @@ struct WrapperWindowHandler {
     /// The editor handle for the plugin's open editor. The editor should clean itself up when it
     /// gets dropped.
     _editor_handle: Box<dyn Any>,
+    /// The plugin's editor, so top-level window resizes can be forwarded to it.
+    editor: Arc<Mutex<Box<dyn Editor>>>,
 
     /// This is used to communicate with the wrapper from the audio thread and from within the
     /// baseview window handler on the GUI thread.
@@ -146,7 +148,23 @@ impl WindowHandler for WrapperWindowHandler {
         }
     }
 
-    fn on_event(&mut self, _window: &mut Window, _event: baseview::Event) -> EventStatus {
+    fn on_event(&mut self, _window: &mut Window, event: baseview::Event) -> EventStatus {
+        if let baseview::Event::Window(baseview::WindowEvent::Resized(window_info)) = &event {
+            // The top-level window got resized by the user or the window manager. Tell the editor
+            // so it can resize its child window to match. If the editor itself asked for this size
+            // through `request_resize()` the editor's size already matches and this is a no-op.
+            // This thread never holds the editor lock while dispatching events, and the editor
+            // does not call back into this window handler, so this cannot deadlock.
+            let physical_size = window_info.physical_size();
+            if self
+                .editor
+                .lock()
+                .window_resized(physical_size.width, physical_size.height)
+            {
+                return EventStatus::Captured;
+            }
+        }
+
         EventStatus::Ignored
     }
 }
@@ -369,6 +387,7 @@ impl<P: Plugin, B: Backend<P>> Wrapper<P, B> {
 
                         WrapperWindowHandler {
                             _editor_handle: editor_handle,
+                            editor,
                             gui_task_receiver,
                         }
                     },

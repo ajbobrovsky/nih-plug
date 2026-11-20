@@ -5,11 +5,12 @@ use crossbeam::atomic::AtomicCell;
 use nih_plug::debug::*;
 use nih_plug::prelude::{Editor, GuiContext, ParentWindowHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use vizia::context::backend::TextConfig;
+use vizia::context::EventProxy;
 use vizia::prelude::*;
 
-use crate::widgets::RawParamEvent;
+use crate::widgets::{GuiContextEvent, RawParamEvent};
 use crate::{assets, widgets, ViziaState, ViziaTheming};
 
 /// An [`Editor`] implementation that calls an vizia draw loop.
@@ -30,6 +31,11 @@ pub(crate) struct ViziaEditor {
     /// to compute a property in an event handler. Like when positioning an element based on the
     /// display value's width.
     pub(crate) emit_parameters_changed_event: Arc<AtomicBool>,
+
+    /// A proxy for sending events to the running vizia application from outside of its event
+    /// loop. Set when the editor is spawned and cleared when its handle gets dropped. Used to
+    /// forward window resizes from the wrapper, see [`Editor::window_resized()`].
+    pub(crate) event_proxy: Arc<Mutex<Option<Box<dyn EventProxy>>>>,
 }
 
 impl Editor for ViziaEditor {
@@ -45,8 +51,12 @@ impl Editor for ViziaEditor {
         let (unscaled_width, unscaled_height) = vizia_state.inner_logical_size();
         let system_scaling_factor = self.scaling_factor.load();
         let user_scale_factor = vizia_state.user_scale_factor();
+        let event_proxy = self.event_proxy.clone();
 
         let mut application = Application::new(move |cx| {
+            // This lets the wrapper send events to this application from another thread
+            *event_proxy.lock().unwrap_or_else(|e| e.into_inner()) = cx.get_proxy().event_proxy;
+
             // Set some default styles to match the iced integration
             if theming >= ViziaTheming::Custom {
                 cx.set_default_font(&[assets::NOTO_SANS]);
@@ -117,8 +127,32 @@ impl Editor for ViziaEditor {
         self.vizia_state.open.store(true, Ordering::Release);
         Box::new(ViziaEditorHandle {
             vizia_state: self.vizia_state.clone(),
+            event_proxy: self.event_proxy.clone(),
             window,
         })
+    }
+
+    fn window_resized(&self, physical_width: u32, physical_height: u32) -> bool {
+        if !self.vizia_state.is_open() {
+            return false;
+        }
+
+        // The event is handled by the `WindowModel` registered on the root entity in `spawn()`
+        let event_proxy = self.event_proxy.lock().unwrap_or_else(|e| e.into_inner());
+        match event_proxy.as_ref() {
+            Some(proxy) => proxy
+                .send(
+                    Event::new(GuiContextEvent::WindowResized {
+                        physical_width,
+                        physical_height,
+                    })
+                    .target(Entity::root())
+                    .origin(Entity::root())
+                    .propagate(Propagation::Direct),
+                )
+                .is_ok(),
+            None => false,
+        }
     }
 
     fn size(&self) -> (u32, u32) {
@@ -162,6 +196,8 @@ impl Editor for ViziaEditor {
 /// The window handle used for [`ViziaEditor`].
 struct ViziaEditorHandle {
     vizia_state: Arc<ViziaState>,
+    /// See [`ViziaEditor::event_proxy`]. Cleared when the window closes.
+    event_proxy: Arc<Mutex<Option<Box<dyn EventProxy>>>>,
     window: WindowHandle,
 }
 
@@ -172,6 +208,7 @@ unsafe impl Send for ViziaEditorHandle {}
 impl Drop for ViziaEditorHandle {
     fn drop(&mut self) {
         self.vizia_state.open.store(false, Ordering::Release);
+        *self.event_proxy.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // XXX: This should automatically happen when the handle gets dropped, but apparently not
         self.window.close();
     }

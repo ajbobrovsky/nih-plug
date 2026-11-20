@@ -106,6 +106,16 @@ pub enum GuiContextEvent {
     /// }
     /// ```
     Resize,
+    /// Sent by the wrapper when the window containing the editor has been resized from the outside
+    /// (for instance the standalone's top-level window being maximized or edge-dragged). Carries
+    /// the new physical size of that window. The editor's window is resized to match, which
+    /// results in a [`WindowEvent::GeometryChanged`] that plugins can use to adapt their layout.
+    WindowResized {
+        /// The new width of the containing window, in physical pixels.
+        physical_width: u32,
+        /// The new height of the containing window, in physical pixels.
+        physical_height: u32,
+    },
 }
 
 /// Handles parameter updates for VIZIA GUIs. Registered in
@@ -152,6 +162,31 @@ impl Model for WindowModel {
                 // handler below this to be fired
                 let (width, height) = self.vizia_state.inner_logical_size();
                 cx.set_window_size(WindowSize { width, height });
+
+                meta.consume();
+            }
+            GuiContextEvent::WindowResized {
+                physical_width,
+                physical_height,
+            } => {
+                // `cx.window_size()` is stored before any scaling, while the containing window's
+                // size includes both the HiDPI and the user scale factor
+                let scale_factor = cx.scale_factor() as f64;
+                if scale_factor > 0.0 && *physical_width > 0 && *physical_height > 0 {
+                    let new_size = WindowSize {
+                        width: (*physical_width as f64 / scale_factor).round().max(1.0) as u32,
+                        height: (*physical_height as f64 / scale_factor).round().max(1.0) as u32,
+                    };
+
+                    // Only resize when the size actually differs. The resize requested through
+                    // `request_resize()` below also arrives here, and reacting to that would cause
+                    // a feedback loop with one pixel rounding differences.
+                    if new_size != cx.window_size() {
+                        // vizia resizes the window at the end of the frame, which triggers a
+                        // `WindowEvent::GeometryChanged`
+                        cx.set_window_size(new_size);
+                    }
+                }
 
                 meta.consume();
             }

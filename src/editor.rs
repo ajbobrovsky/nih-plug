@@ -69,6 +69,18 @@ pub trait Editor: Send {
     /// loaded.
     fn param_values_changed(&self);
 
+    /// Called when the window the editor is embedded in has been resized by the host or by the
+    /// user, for instance when the standalone's top-level window gets maximized or edge-dragged.
+    /// The size is the new _physical_ size of that window in pixels. The editor should resize
+    /// itself to fill the window if it can. Return `true` if the resize was handled. The default
+    /// implementation ignores the event and returns `false`.
+    ///
+    /// Right now only the standalone wrapper calls this; the plugin wrappers never do.
+    fn window_resized(&self, physical_width: u32, physical_height: u32) -> bool {
+        let _ = (physical_width, physical_height);
+        false
+    }
+
     // TODO: Reconsider adding a tick function here for the Linux `IRunLoop`. To keep this platform
     //       and API agnostic, add a way to ask the GuiContext if the wrapper already provides a
     //       tick function. If it does not, then the Editor implementation must handle this by
